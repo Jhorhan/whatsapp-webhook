@@ -1,22 +1,26 @@
 import express, { Request, Response } from "express";
 import bodyParser from "body-parser";
 import axios from "axios";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 app.use(bodyParser.json());
 
 // ✅ Tokens y configuración
-const VERIFY_TOKEN = process.env.META_TOKEN;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const APPSHEET_API_KEY = process.env.APPSHEET_API_KEY;
-const APPSHEET_URL = process.env.APPSHEET_URL1;
-const WHATSAPP_TOKEN =  process.env.WHATSAPP_TOKEN;
+const APPSHEET_URL = process.env.APPSHEET_URL;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
 // 🧠 Memoria temporal del flujo por número
+// Esta memoria evita mensajes repetidos y loops.
 interface ProveedorData {
   idServicio: string;
   placa?: string;
-  valor?: number;
+  valor?: number; // valor desactivado pero listo para futuro
 }
 
 const proveedores = new Map<string, ProveedorData>();
@@ -48,29 +52,50 @@ app.post("/webhook", async (req: Request, res: Response) => {
   try {
     const entry = req.body.entry?.[0];
     const changes = entry?.changes?.[0];
+
+    // 🔥🔥 IMPORTANTE — IGNORAR ESTADOS
+    if (changes?.value?.statuses) {
+      return; // evita loops y mensajes repetidos
+    }
+
     const message = changes?.value?.messages?.[0];
     const from = message?.from;
 
     if (!message || !from) return;
 
-    // ✅ CASO 1: Botón presionado
+    // 🚨 EXTRA — evitar que WhatsApp reenvíe el mismo mensaje dos veces
+    if (message.id && message.id.endsWith("_dup")) {
+      console.log("⚠️ Mensaje duplicado ignorado");
+      return;
+    }
+
+    // -------------------------------------
+    //  BOTÓN PRESIONADO
+    // -------------------------------------
     if (message.type === "button") {
       const payload = message.button?.payload || "";
       console.log(`🧾 Payload recibido: ${payload}`);
 
-      // --- CONFIRMAR SERVICIO ---
+      // CONFIRMAR SERVICIO
       if (payload.startsWith("CONFIRMAR_SERVICIO_")) {
         const idServicio = payload.replace("CONFIRMAR_SERVICIO_", "");
+
+        // 🚨 Protección — si ya está manejando un servicio, bloquea
+        if (proveedores.has(from)) {
+          console.log("⚠️ Ya tenía un servicio activo, limpiando...");
+          proveedores.delete(from);
+        }
+
         proveedores.set(from, { idServicio });
 
         await enviarMensajeWhatsApp(
           from,
-          "Por favor, escribe **solo la placa de la moto** que realizará el servicio. Ejemplo: ABC123"
+          "Por favor, escribe **SOLO LA PLACA DE LA MOTO** que realizará el servicio. Ejemplo: ABC123"
         );
         return;
       }
 
-      // --- NO DISPONIBLE ---
+      // NO DISPONIBLE
       if (payload.startsWith("NO_DISPONIBLE_")) {
         const idServicio = payload.replace("NO_DISPONIBLE_", "");
         await actualizarAppSheetFinal(idServicio, false);
@@ -82,51 +107,67 @@ app.post("/webhook", async (req: Request, res: Response) => {
       }
     }
 
-    // ✅ CASO 2: Mensaje de texto — puede ser placa o valor
+    // -------------------------------------
+    //  TEXTO — SOLO PLACA (valor desactivado)
+    // -------------------------------------
     if (message.type === "text") {
       const texto = message.text?.body?.trim()?.toUpperCase();
 
-      // Si el número está en flujo
       const data = proveedores.get(from);
       if (!data) return;
 
-      // Paso 1️⃣ — Si no tiene placa aún
+      // 1️⃣ Esperando PLACA
       if (!data.placa) {
         data.placa = texto;
         proveedores.set(from, data);
 
+        // 🔥 Lógica actual: flujo termina después de placa
+        await actualizarAppSheetFinal(data.idServicio, true, data.placa);
+
         await enviarMensajeWhatsApp(
           from,
-          `✅ Placa *${texto}* registrada.\nPor favor, escribe el **valor del servicio** en pesos (solo el número).`
+          `✅ Placa *${texto}* registrada.\nPuedes proceder con el domicilio 🏍️`
         );
+
+        // 🚨 Muy importante: eliminar flujo para evitar mensajes repetitivos
+        proveedores.delete(from);
         return;
       }
 
-      // Paso 2️⃣ — Si ya tiene placa pero no valor
+      // --------------------------------------------------
+      // 🔥🔥 LÓGICA DEL VALOR DEL SERVICIO (DESACTIVADA)
+      // Descomentar solo si en el futuro lo vuelves a activar
+      // --------------------------------------------------
+      /*
       if (!data.valor) {
         const valor = parseInt(texto.replace(/\D/g, ""), 10);
+
         if (isNaN(valor)) {
           await enviarMensajeWhatsApp(
             from,
-            "⚠️ Por favor, escribe solo el valor numérico. Ejemplo: 15000"
+            "⚠️ Escribe solo el valor del servicio en números. Ejemplo: 15000"
           );
           return;
         }
 
         data.valor = valor;
 
-        // ✅ Guardar todo en AppSheet en una sola llamada
-        await actualizarAppSheetFinal(data.idServicio, true, data.placa, data.valor);
+        await actualizarAppSheetFinal(
+          data.idServicio,
+          true,
+          data.placa,
+          valor
+        );
 
         await enviarMensajeWhatsApp(
           from,
-          `💰 Valor confirmado: *$${valor.toLocaleString()}*.\n✅ Todo correcto, puedes proceder con el domicilio 🏍️`
+          `💰 Valor confirmado: *$${valor.toLocaleString()}*.\nPuedes proceder con el domicilio 🏍️`
         );
 
-        // Borrar datos de memoria
         proveedores.delete(from);
         return;
       }
+      */
     }
   } catch (err) {
     console.error("❌ Error procesando webhook:", err);
@@ -134,7 +175,7 @@ app.post("/webhook", async (req: Request, res: Response) => {
 });
 
 // -------------------------------------
-// 3️⃣ ACTUALIZAR APPSHEET (Una sola vez)
+// 3️⃣ ACTUALIZAR APPSHEET
 // -------------------------------------
 async function actualizarAppSheetFinal(
   idServicio: string,
@@ -147,8 +188,10 @@ async function actualizarAppSheetFinal(
       id_domicilio: idServicio,
       webhooklogID: confirmado,
     };
+
     if (placa) row.placa = placa;
-    if (valor) row.valor_servicio = valor;
+
+    if (valor) row.valor_servicio = valor; // se enviará solo cuando actives valor
 
     const payload = {
       Action: "Edit",
@@ -156,7 +199,7 @@ async function actualizarAppSheetFinal(
       Rows: [row],
     };
 
-    await axios.post(APPSHEET_URL, payload, {
+    await axios.post(APPSHEET_URL!, payload, {
       headers: {
         ApplicationAccessKey: APPSHEET_API_KEY,
         "Content-Type": "application/json",
@@ -190,6 +233,7 @@ async function enviarMensajeWhatsApp(to: string, mensaje: string) {
         },
       }
     );
+
     console.log(`💬 Mensaje enviado a ${to}: ${mensaje}`);
   } catch (error: any) {
     console.error(
@@ -200,5 +244,7 @@ async function enviarMensajeWhatsApp(to: string, mensaje: string) {
 }
 
 // -------------------------------------
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Servidor escuchando en puerto ${PORT}`));
+const PORT = process.env.PORT || 3500;
+app.listen(PORT, () =>
+  console.log(`🚀 Servidor escuchando en puerto ${PORT}`)
+);
