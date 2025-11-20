@@ -25,6 +25,10 @@ interface ProveedorData {
 
 const proveedores = new Map<string, ProveedorData>();
 
+// 🛑 Evitar procesar dos veces el mismo mensaje de WhatsApp
+const mensajesProcesados = new Set<string>();
+
+
 // -------------------------------------
 // 1️⃣ VERIFICAR CONEXIÓN CON META
 // -------------------------------------
@@ -63,11 +67,18 @@ app.post("/webhook", async (req: Request, res: Response) => {
 
     if (!message || !from) return;
 
-    // 🚨 EXTRA — evitar que WhatsApp reenvíe el mismo mensaje dos veces
-    if (message.id && message.id.endsWith("_dup")) {
-      console.log("⚠️ Mensaje duplicado ignorado");
-      return;
-    }
+   // 🛑 ANTI-DUPLICADOS REAL
+if (message.id) {
+  if (mensajesProcesados.has(message.id)) {
+    console.log("⚠️ Mensaje repetido ignorado:", message.id);
+    return;
+  }
+
+  mensajesProcesados.add(message.id);
+
+  // Se limpia después de 2 minutos
+  setTimeout(() => mensajesProcesados.delete(message.id), 120000);
+}
 
     // -------------------------------------
     //  BOTÓN PRESIONADO
