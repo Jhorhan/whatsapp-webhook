@@ -62,6 +62,12 @@ app.post("/webhook", async (req: Request, res: Response) => {
       return; // evita loops y mensajes repetidos
     }
 
+    // 🛑 Ignorar eventos sin mensajes
+    if (!changes?.value?.messages || changes?.value?.messages?.length === 0) {
+      console.log("⚠️ Evento ignorado: no hay mensajes del usuario");
+      return;
+    }
+
     const message = changes?.value?.messages?.[0];
     const from = message?.from;
 
