@@ -21,13 +21,16 @@ interface ProveedorData {
   idServicio: string;
   placa?: string;
   valor?: number; // valor desactivado pero listo para futuro
+
+  // 👇 NUEVO — no rompe nada
+  puntoRecogida?: string;
+  puntoEntrega?: string;
 }
 
 const proveedores = new Map<string, ProveedorData>();
 
 // 🛑 Evitar procesar dos veces el mismo mensaje de WhatsApp
 const mensajesProcesados = new Set<string>();
-
 
 // -------------------------------------
 // 1️⃣ VERIFICAR CONEXIÓN CON META
@@ -59,7 +62,7 @@ app.post("/webhook", async (req: Request, res: Response) => {
 
     // 🔥🔥 IMPORTANTE — IGNORAR ESTADOS
     if (changes?.value?.statuses) {
-      return; // evita loops y mensajes repetidos
+      return;
     }
 
     // 🛑 Ignorar eventos sin mensajes
@@ -73,18 +76,16 @@ app.post("/webhook", async (req: Request, res: Response) => {
 
     if (!message || !from) return;
 
-   // 🛑 ANTI-DUPLICADOS REAL
-if (message.id) {
-  if (mensajesProcesados.has(message.id)) {
-    console.log("⚠️ Mensaje repetido ignorado:", message.id);
-    return;
-  }
+    // 🛑 ANTI-DUPLICADOS REAL
+    if (message.id) {
+      if (mensajesProcesados.has(message.id)) {
+        console.log("⚠️ Mensaje repetido ignorado:", message.id);
+        return;
+      }
 
-  mensajesProcesados.add(message.id);
-
-  // Se limpia después de 2 minutos
-  setTimeout(() => mensajesProcesados.delete(message.id), 120000);
-}
+      mensajesProcesados.add(message.id);
+      setTimeout(() => mensajesProcesados.delete(message.id), 120000);
+    }
 
     // -------------------------------------
     //  BOTÓN PRESIONADO
@@ -95,7 +96,11 @@ if (message.id) {
 
       // CONFIRMAR SERVICIO
       if (payload.startsWith("CONFIRMAR_SERVICIO_")) {
-        const idServicio = payload.replace("CONFIRMAR_SERVICIO_", "");
+        const dataPayload = payload.replace("CONFIRMAR_SERVICIO_", "");
+
+        // 👇 NUEVO: soporta id|recogida|entrega SIN romper si no vienen
+        const [idServicio, puntoRecogida, puntoEntrega] =
+          dataPayload.split("|");
 
         // 🚨 Protección — si ya está manejando un servicio, bloquea
         if (proveedores.has(from)) {
@@ -103,11 +108,23 @@ if (message.id) {
           proveedores.delete(from);
         }
 
-        proveedores.set(from, { idServicio });
+        proveedores.set(from, {
+          idServicio,
+          puntoRecogida,
+          puntoEntrega,
+        });
 
+        // ✅ MENSAJE COMO LO QUIERES
         await enviarMensajeWhatsApp(
           from,
-          "Por favor, escribe **SOLO LA PLACA DE LA MOTO** que realizará el servicio. Ejemplo: ABC123"
+          `🛵 *CONFIRMACIÓN DE DOMICILIO*
+
+🆔 Servicio: ${idServicio}
+📍 Recogida: ${puntoRecogida ?? "—"}
+🎯 Entrega: ${puntoEntrega ?? "—"}
+
+✍️ Escribe *SOLO LA PLACA DE LA MOTO*
+Ejemplo: ABC123`
         );
         return;
       }
@@ -207,8 +224,7 @@ async function actualizarAppSheetFinal(
     };
 
     if (placa) row.placa = placa;
-
-    if (valor) row.valor_servicio = valor; // se enviará solo cuando actives valor
+    if (valor) row.valor_servicio = valor;
 
     const payload = {
       Action: "Edit",
