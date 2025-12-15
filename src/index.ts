@@ -114,7 +114,7 @@ app.post("/webhook", async (req: Request, res: Response) => {
           puntoEntrega,
         });
 
-        // ✅ MENSAJE COMO LO QUIERES
+        
         await enviarMensajeWhatsApp(
           from,
           `🛵 *CONFIRMACIÓN DE DOMICILIO*
@@ -163,14 +163,14 @@ Ejemplo: ABC123`
           `✅ Placa *${texto}* registrada.\nPuedes proceder con el domicilio 🏍️`
         );
 
-        // 🚨 Muy importante: eliminar flujo para evitar mensajes repetitivos
+        // eliminar flujo para evitar mensajes repetitivos
         proveedores.delete(from);
         return;
       }
 
       // --------------------------------------------------
       // 🔥🔥 LÓGICA DEL VALOR DEL SERVICIO (DESACTIVADA)
-      // Descomentar solo si en el futuro lo vuelves a activar
+      // Descomentar solo si en el futuro se necesita
       // --------------------------------------------------
       /*
       if (!data.valor) {
