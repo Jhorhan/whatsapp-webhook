@@ -15,21 +15,25 @@ const APPSHEET_URL = process.env.APPSHEET_URL;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
+// ✅ Cliente dedicado para AppSheet (TIMEOUT SEGURO)
+const appSheetClient = axios.create({
+  timeout: 90000, // ⏱️ 90 segundos
+  headers: {
+    ApplicationAccessKey: APPSHEET_API_KEY!,
+    "Content-Type": "application/json",
+  },
+});
+
 // 🧠 Memoria temporal del flujo por número
-// Esta memoria evita mensajes repetidos y loops.
 interface ProveedorData {
   idServicio: string;
   placa?: string;
-  valor?: number; // valor desactivado pero listo para futuro
-
-  // 👇 NUEVO — no rompe nada
+  valor?: number;
   puntoRecogida?: string;
   puntoEntrega?: string;
 }
 
 const proveedores = new Map<string, ProveedorData>();
-
-// 🛑 Evitar procesar dos veces el mismo mensaje de WhatsApp
 const mensajesProcesados = new Set<string>();
 
 // -------------------------------------
@@ -54,59 +58,33 @@ app.get("/webhook", (req: Request, res: Response) => {
 // -------------------------------------
 app.post("/webhook", async (req: Request, res: Response) => {
   console.log("📩 Webhook recibido:", JSON.stringify(req.body, null, 2));
-  res.sendStatus(200); // Responde a Meta de inmediato
+  res.sendStatus(200);
 
   try {
     const entry = req.body.entry?.[0];
     const changes = entry?.changes?.[0];
 
-    // 🔥🔥 IMPORTANTE — IGNORAR ESTADOS
-    if (changes?.value?.statuses) {
-      return;
-    }
+    if (changes?.value?.statuses) return;
+    if (!changes?.value?.messages?.length) return;
 
-    // 🛑 Ignorar eventos sin mensajes
-    if (!changes?.value?.messages || changes?.value?.messages?.length === 0) {
-      console.log("⚠️ Evento ignorado: no hay mensajes del usuario");
-      return;
-    }
+    const message = changes.value.messages[0];
+    const from = message.from;
+    if (!from) return;
 
-    const message = changes?.value?.messages?.[0];
-    const from = message?.from;
-
-    if (!message || !from) return;
-
-    // 🛑 ANTI-DUPLICADOS REAL
     if (message.id) {
-      if (mensajesProcesados.has(message.id)) {
-        console.log("⚠️ Mensaje repetido ignorado:", message.id);
-        return;
-      }
-
+      if (mensajesProcesados.has(message.id)) return;
       mensajesProcesados.add(message.id);
       setTimeout(() => mensajesProcesados.delete(message.id), 120000);
     }
 
-    // -------------------------------------
-    //  BOTÓN PRESIONADO
-    // -------------------------------------
+    // BOTÓN
     if (message.type === "button") {
       const payload = message.button?.payload || "";
-      console.log(`🧾 Payload recibido: ${payload}`);
 
-      // CONFIRMAR SERVICIO
       if (payload.startsWith("CONFIRMAR_SERVICIO_")) {
         const dataPayload = payload.replace("CONFIRMAR_SERVICIO_", "");
-
-        // 👇 NUEVO: soporta id|recogida|entrega SIN romper si no vienen
         const [idServicio, puntoRecogida, puntoEntrega] =
           dataPayload.split("|");
-
-        // 🚨 Protección — si ya está manejando un servicio, bloquea
-        if (proveedores.has(from)) {
-          console.log("⚠️ Ya tenía un servicio activo, limpiando...");
-          proveedores.delete(from);
-        }
 
         proveedores.set(from, {
           idServicio,
@@ -114,7 +92,6 @@ app.post("/webhook", async (req: Request, res: Response) => {
           puntoEntrega,
         });
 
-        
         await enviarMensajeWhatsApp(
           from,
           `🛵 *CONFIRMACIÓN DE DOMICILIO*
@@ -129,10 +106,12 @@ Ejemplo: ABC123`
         return;
       }
 
-      // NO DISPONIBLE
       if (payload.startsWith("NO_DISPONIBLE_")) {
         const idServicio = payload.replace("NO_DISPONIBLE_", "");
-        await actualizarAppSheetFinal(idServicio, false);
+
+        // 👉 AppSheet en background (no bloquea WhatsApp)
+        actualizarAppSheetFinal(idServicio, false).catch(() => {});
+
         await enviarMensajeWhatsApp(
           from,
           "Has indicado que no estás disponible. Gracias por confirmar 👍"
@@ -141,67 +120,25 @@ Ejemplo: ABC123`
       }
     }
 
-    // -------------------------------------
-    //  TEXTO — SOLO PLACA (valor desactivado)
-    // -------------------------------------
+    // TEXTO
     if (message.type === "text") {
       const texto = message.text?.body?.trim()?.toUpperCase();
-
       const data = proveedores.get(from);
-      if (!data) return;
+      if (!data || !texto) return;
 
-      // 1️⃣ Esperando PLACA
       if (!data.placa) {
         data.placa = texto;
-        proveedores.set(from, data);
 
-        // 🔥 Lógica actual: flujo termina después de placa
-        await actualizarAppSheetFinal(data.idServicio, true, data.placa);
+        // 👉 AppSheet en background
+        actualizarAppSheetFinal(data.idServicio, true, texto).catch(() => {});
 
         await enviarMensajeWhatsApp(
           from,
           `✅ Placa *${texto}* registrada.\nPuedes proceder con el domicilio 🏍️`
         );
 
-        // eliminar flujo para evitar mensajes repetitivos
         proveedores.delete(from);
-        return;
       }
-
-      // --------------------------------------------------
-      // 🔥🔥 LÓGICA DEL VALOR DEL SERVICIO (DESACTIVADA)
-      // Descomentar solo si en el futuro se necesita
-      // --------------------------------------------------
-      /*
-      if (!data.valor) {
-        const valor = parseInt(texto.replace(/\D/g, ""), 10);
-
-        if (isNaN(valor)) {
-          await enviarMensajeWhatsApp(
-            from,
-            "⚠️ Escribe solo el valor del servicio en números. Ejemplo: 15000"
-          );
-          return;
-        }
-
-        data.valor = valor;
-
-        await actualizarAppSheetFinal(
-          data.idServicio,
-          true,
-          data.placa,
-          valor
-        );
-
-        await enviarMensajeWhatsApp(
-          from,
-          `💰 Valor confirmado: *$${valor.toLocaleString()}*.\nPuedes proceder con el domicilio 🏍️`
-        );
-
-        proveedores.delete(from);
-        return;
-      }
-      */
     }
   } catch (err) {
     console.error("❌ Error procesando webhook:", err);
@@ -209,7 +146,7 @@ Ejemplo: ABC123`
 });
 
 // -------------------------------------
-// 3️⃣ ACTUALIZAR APPSHEET
+// 3️⃣ ACTUALIZAR APPSHEET (CON TIMEOUT)
 // -------------------------------------
 async function actualizarAppSheetFinal(
   idServicio: string,
@@ -232,18 +169,20 @@ async function actualizarAppSheetFinal(
       Rows: [row],
     };
 
-    await axios.post(APPSHEET_URL!, payload, {
-      headers: {
-        ApplicationAccessKey: APPSHEET_API_KEY,
-        "Content-Type": "application/json",
-      },
-    });
+    await appSheetClient.post(APPSHEET_URL!, payload);
 
     console.log(
-      `✅ AppSheet actualizado: ${idServicio} | Confirmado=${confirmado} | Placa=${placa} | Valor=${valor}`
+      `✅ AppSheet actualizado: ${idServicio} | Confirmado=${confirmado}`
     );
-  } catch (error) {
-    console.error("❌ Error actualizando AppSheet:", error);
+  } catch (error: any) {
+    if (error.code === "ECONNABORTED") {
+      console.warn("⏱️ Timeout AppSheet (controlado)");
+      return;
+    }
+    console.error(
+      "❌ Error AppSheet:",
+      error.response?.data || error.message
+    );
   }
 }
 
@@ -266,11 +205,9 @@ async function enviarMensajeWhatsApp(to: string, mensaje: string) {
         },
       }
     );
-
-    console.log(`💬 Mensaje enviado a ${to}: ${mensaje}`);
   } catch (error: any) {
     console.error(
-      "❌ Error enviando mensaje de WhatsApp:",
+      "❌ Error enviando WhatsApp:",
       error.response?.data || error.message
     );
   }
